@@ -42,7 +42,7 @@ streaming_vlm_config = {
 }
 
 if __name__ == "__main__":
-    default_video = "Baidu_FIFA/FIFA_Worldcup_2018年06月23日 2018年俄罗斯世界杯F组第2轮 韩国VS墨西哥 1080I ITV 英语 2nd.ts.mp4"
+    default_video = "Baidu_FIFA/FIFA_Worldcup_20180623_2018.RussiaWorldCupFGroup2Round_KoreaVSMexico_1080I_ITV_EN_2nd.ts.mp4"
     args = argparse.ArgumentParser()
     args.add_argument("--pos_mode", type=str, default="shrink", choices=["append", "shrink"])
     args.add_argument("--all_text", action="store_true", default=False)
