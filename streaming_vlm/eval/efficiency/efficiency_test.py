@@ -71,7 +71,8 @@ if __name__ == "__main__":
     time_results, token_decoded_nums =[], []
     for i in range(0, duration, chunk):
         args.skip_first_chunk = i
-        time_result, token_decoded_num = streaming_inference(**args.__dict__, **config_used, duration=chunk, time_test=True, quiet=False)
+        time_result = streaming_inference(**args.__dict__, **config_used, duration=chunk, time_test=True, quiet=False)
+        token_decoded_num = [0] * len(time_result)
         
         import gc, torch; torch.cuda.synchronize()
         gc.collect()
