@@ -38,11 +38,50 @@ Personal learning log for understanding StreamingVLM and related concepts.
 - **LiveSports3k-cc**: live sports commentary evaluation
 - **Efficiency**: measures inference time per chunk vs. cumulative video length across 4 modes:
   - **(a) FullAttention**: KV cache grows forever (`window_size=100000`), slows down quadratically
-  - **(b) Sliding window w/o overlap**: fixed window, reuses KV cache, constant time but limited context
+  - **(b) Sliding window w/o overlap**: fixed window, reuses KV cache, constant time but limited context. Paper shows a sawtooth pattern (cache fills then hard-resets every 100s). **Our implementation does NOT hard-reset** — it uses continuous selective pruning, so our mode b produces a flat noisy line instead.
   - **(c) Sliding window w/ overlap**: fixed window but recomputes from scratch each chunk (`recompute=True`), constant but slow
   - **(d) StreamingVLM**: sink + sliding window, no recompute (`text_sink=512`, `text_sliding_window=512`) — constant time AND fast
   - Output: JSON with per-chunk `gen_time_sec` vs `video_len_sec` → plot to reproduce paper figure
   - This is the most hardware-agnostic result (1 GPU sufficient) and good for advisor demos
+  - **Output JSON metrics per chunk:**
+
+    | Metric | What it measures |
+    |---|---|
+    | `gen_time_sec` | Wall-clock seconds the model spent generating tokens for this 1-second chunk (GEN phase only) |
+    | `video_len_sec` | Cumulative video processed so far (1s, 2s, ..., 1000s) |
+    | `avg_gen_time_sec` | Mean `gen_time_sec` across all chunks (summary field) |
+    | `gen_time_per_token` | `gen_time_sec / decoded_tokens` — `null` in our run (token counts not tracked by inference.py) |
+
+  - **Per-chunk terminal output fields** (printed as `[Loop N] total=Xs | PKV=Xs | ...`):
+
+    | Field | What it measures |
+    |---|---|
+    | `total` | Wall-clock time for the entire chunk pipeline (target: ≤ `chunk_duration` = 1s for real-time) |
+    | `PKV` | Time to prune/evict the KV cache — keeps first `text_sink` + last `text_sliding_window` tokens, drops the rest. Only costly once cache hits its size limit |
+    | `CHECK` | Time for internal sanity checks on KV cache consistency |
+    | `VIDEO` | Time to decode and resize the video frame(s) for this chunk |
+    | `INPUT` | Time to tokenize and build the model input tensor (text + visual tokens) |
+    | `GEN` | Time for the LLM to generate output tokens (forward pass + sampling) — this is `gen_time_sec` in the JSON. **GPU-bound.** |
+    | `POST` | Takes the raw token IDs from GEN and converts them back to text (tokenizer decode), then formats and writes the `.vtt` subtitle file. **CPU-bound, essentially free.** |
+
+  - **Key plot:** `gen_time_sec` vs `video_len_sec` across all 4 modes — mode (a) curves up quadratically, modes (b/c/d) stay flat, mode (d) has the lowest flat line
+
+  - **Our plot vs paper plot — important difference:**
+    - The paper's Y-axis is `gen_time_per_token` (seconds **per token generated**)
+    - Our plot uses `gen_time_sec` (seconds **per chunk**) — a different metric
+    - **Why we used per-chunk instead of per-token:** when we fixed the unpack bug in `efficiency_test.py` (line 74), `streaming_inference()` only returns timing data, not token counts. We had to default `token_decoded_num = [0] * len(time_result)`, making per-token latency impossible to compute. Per-chunk was the only available metric.
+    - **Why this matters:** `gen_time_per_token` normalizes out variable caption length. A chunk that generates 20 tokens in 2s and one that generates 2 tokens in 0.2s both give 0.1 s/token. Without this normalization, noisy caption lengths dominate the plot, masking patterns like mode b's sawtooth (which is caused by the visual window resetting every 100 frames).
+    - **Fix needed:** patch `streaming_inference()` to also return decoded token counts per chunk, then re-run all 4 modes to reproduce the paper figure exactly.
+
+  - **KV cache eviction — how it actually works in this codebase:**
+    - There is **no hard reset** (fully emptying the cache). All modes use `prune_id_and_kv_cache()` which surgically removes specific token ranges.
+    - Eviction is **continuous and selective**: each chunk, the oldest visual frame tokens and/or oldest text round tokens are removed one at a time.
+    - The paper's mode b sawtooth implies a full cache clear every N chunks — this behavior **does not exist in the codebase** and would require adding a `cache.reset()` call every `window_size` chunks in `streaming_inference()`.
+    - What each mode actually prunes per chunk:
+      - **(a)**: nothing (window so large it never triggers eviction)
+      - **(b)**: oldest visual frame once >100 frames accumulated; no text eviction (`text_sink=None`, `text_sliding_window=None`)
+      - **(c)**: nothing pruned — full recompute from scratch (`recompute=True`)
+      - **(d)**: oldest visual frame + middle text tokens (keeps first `text_sink=512` + last `text_sliding_window=512`, drops middle)
 
 ---
 

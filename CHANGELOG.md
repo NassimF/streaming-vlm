@@ -14,6 +14,12 @@ Each entry should include:
 ## Entries
 
 ### 2026-03-13
+**File:** `streaming_vlm/eval/efficiency/efficiency_test.py` line 45
+**Change:** Fixed hardcoded default `--video_path` — changed from Chinese-character filename to the ASCII-transliterated name that was actually downloaded (`FIFA_Worldcup_20180623_2018.RussiaWorldCupFGroup2Round_KoreaVSMexico_1080I_ITV_EN_2nd.ts.mp4`).
+**Why:** HuggingFace Hub downloaded the file with a transliterated filename; the original Chinese name in the script caused `FileNotFoundError`.
+**Result:** Benchmark runs without needing an explicit `--video_path` argument.
+
+### 2026-03-13
 **File:** `streaming_vlm/eval/efficiency/efficiency_test.py` line 74
 **Change:** Fixed unpack bug — `streaming_inference` returns only `time_results` when `time_test=True`, but the script tried to unpack two values `(time_result, token_decoded_num)`. Fixed by assigning separately and defaulting `token_decoded_num` to zeros.
 **Why:** `inference.py` doesn't track per-chunk token counts. `gen_time_per_token` will be None in output JSON (minor — the primary metric `gen_time_sec` is unaffected).
