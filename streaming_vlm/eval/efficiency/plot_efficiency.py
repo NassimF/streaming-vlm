@@ -1,5 +1,5 @@
 """
-Plot gen_time_sec vs video_len_sec for efficiency benchmark modes.
+Plot gen_time_per_token vs video_len_sec for efficiency benchmark modes.
 Reproduces the efficiency figure from the StreamingVLM paper.
 
 Usage:
@@ -66,12 +66,23 @@ def main():
             continue
         data = load_json(path)
         chunks = data["per_chunk"]
-        x = [c["video_len_sec"] for c in chunks]
-        y = [c["gen_time_sec"]  for c in chunks]
+
+        # Use gen_time_per_token if available (new runs), fall back to gen_time_sec (old runs)
+        has_token_counts = any(c.get("decoded_tokens", 0) > 0 for c in chunks)
+        if has_token_counts:
+            pairs = [(c["video_len_sec"], c["gen_time_per_token"])
+                     for c in chunks if c.get("gen_time_per_token") is not None]
+            x, y = zip(*pairs) if pairs else ([], [])
+            x, y = list(x), list(y)
+            y_label_metric = "gen_time_per_token"
+        else:
+            x = [c["video_len_sec"] for c in chunks]
+            y = [c["gen_time_sec"] for c in chunks]
+            y_label_metric = "gen_time_sec (no token counts)"
 
         # Optional rolling average
         if args.smooth > 1:
-            y = np.convolve(y, np.ones(args.smooth) / args.smooth, mode="valid")
+            y = list(np.convolve(y, np.ones(args.smooth) / args.smooth, mode="valid"))
             x = x[len(x) - len(y):]
 
         style = MODE_STYLES[mode_key]
@@ -79,15 +90,14 @@ def main():
                 linestyle=style["linestyle"], linewidth=style["linewidth"], alpha=0.85)
         loaded[mode_key] = True
         print(f"  [loaded] {mode_key}: {len(chunks)} chunks, "
-              f"avg gen={np.mean([c['gen_time_sec'] for c in chunks]):.3f}s")
+              f"metric={y_label_metric}, avg={np.mean(y):.4f}")
 
-    # Draw real-time line (gen_time == video_time, i.e. y=1 since each chunk = 1s video)
-    xlim = ax.get_xlim()
-    ax.axhline(y=1.0, color="gray", linestyle=":", linewidth=1.2, label="Real-time threshold (1s/chunk)")
+    # Real-time threshold: 0.1 s/token matches the paper's dashed line
+    ax.axhline(y=0.1, color="black", linestyle="--", linewidth=1.5, label="Real-time threshold (0.1 s/token)")
 
-    ax.set_xlabel("Video length processed (seconds)", fontsize=12)
-    ax.set_ylabel("Generation time per chunk (seconds)", fontsize=12)
-    ax.set_title("Streaming Inference Efficiency: gen time vs video length", fontsize=13)
+    ax.set_xlabel("Processed video length (s)", fontsize=12)
+    ax.set_ylabel("per token latency (s)", fontsize=12)
+    ax.set_title("Generation latency per token vs Video length", fontsize=13)
     ax.legend(fontsize=10, loc="upper left")
     ax.yaxis.set_minor_locator(ticker.AutoMinorLocator())
     ax.grid(True, which="major", alpha=0.3)
