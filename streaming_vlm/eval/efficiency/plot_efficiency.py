@@ -103,7 +103,7 @@ def main():
     ax.grid(True, which="major", alpha=0.3)
     ax.grid(True, which="minor", alpha=0.1)
     ax.set_xlim(left=0)
-    ax.set_ylim(bottom=0)
+    ax.set_ylim(bottom=0, top=0.7)
 
     os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
     fig.tight_layout()

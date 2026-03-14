@@ -73,6 +73,13 @@ Personal learning log for understanding StreamingVLM and related concepts.
     - **Why this matters:** `gen_time_per_token` normalizes out variable caption length. A chunk that generates 20 tokens in 2s and one that generates 2 tokens in 0.2s both give 0.1 s/token. Without this normalization, noisy caption lengths dominate the plot, masking patterns like mode b's sawtooth (which is caused by the visual window resetting every 100 frames).
     - **Fix needed:** patch `streaming_inference()` to also return decoded token counts per chunk, then re-run all 4 modes to reproduce the paper figure exactly.
 
+  - **Decoded token count per chunk:**
+    - Token count is **not fixed** — it varies per chunk depending on how much the model has to say about that second of video
+    - The model generates tokens until it emits `<|im_end|>` (token ID `151645` in Qwen's vocabulary — the "end of turn" special token) or hits `MAX_TOKEN_PER_DURATION` (hard cap)
+    - Quiet/uneventful seconds → few tokens (e.g. `"..."` = ~3–5 tokens)
+    - Action-packed seconds → more tokens (e.g. `"He puts his hand up deliberately."` = ~9 tokens)
+    - This variability is why `gen_time_per_token` is a better metric than `gen_time_sec` — it normalizes out caption length and isolates the attention cost
+
   - **KV cache eviction — how it actually works in this codebase:**
     - There is **no hard reset** (fully emptying the cache). All modes use `prune_id_and_kv_cache()` which surgically removes specific token ranges.
     - Eviction is **continuous and selective**: each chunk, the oldest visual frame tokens and/or oldest text round tokens are removed one at a time.
