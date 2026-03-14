@@ -68,71 +68,86 @@ if __name__ == "__main__":
     del args.baseline_mode
     duration = 1000
     chunk = 1000
-    time_results, token_decoded_nums =[], []
-    for i in range(0, duration, chunk):
-        args.skip_first_chunk = i
-        time_result = streaming_inference(**args.__dict__, **config_used, duration=chunk, time_test=True, quiet=False)
-        token_decoded_num = [r.get('decoded_tokens', 0) for r in time_result]
-        
-        import gc, torch; torch.cuda.synchronize()
-        gc.collect()
-        torch.cuda.empty_cache(); torch.cuda.ipc_collect()
-        time_results.extend(time_result)
-        token_decoded_nums.extend(token_decoded_num)
-    
+    time_results, token_decoded_nums = [], []
+
     def _safe(s: str) -> str:
         return s.replace("/", "_").replace("\\", "_").replace(" ", "_")
-    chunk_dur = config_used["chunk_duration"]
-    num_chunks = len(time_results)
-    records = []
-    for i, sec_time in enumerate(time_results):
-        gen_t = float(sec_time.get("GEN", 0.0))
-        dec = int(token_decoded_nums[i]) if i < len(token_decoded_nums) else 0
-        t_start = (i + args.skip_first_chunk) * chunk_dur
-        video_len = (i + 1) * chunk_dur  # Cumulative video length
-        records.append({
-            "chunk_index": i,
-            "time_start_sec": t_start,
-            "video_len_sec": video_len,
-            "gen_time_sec": gen_t,
-            "decoded_tokens": dec,
-            "gen_time_per_token": (gen_t / dec) if dec > 0 else None
-        })
-    meta = {
-        "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
-        "model_path": args.model_path,
-        "model_base": args.model_base,
-        "video_path": args.video_path,
-        "pos_mode": args.pos_mode,
-        "all_text": args.all_text,
-        "skip_first_chunk": args.skip_first_chunk,
-        "temperature": args.temperature,
-        "mode": "baseline_a" if baseline_mode == "a" else "baseline_b" if baseline_mode == "b" else "baseline_c" if baseline_mode == "c" else "streaming",
-        "window_size": config_used["window_size"],
-        "chunk_duration": config_used["chunk_duration"],
-        "text_round": config_used["text_round"],
-        "text_sink": config_used["text_sink"],
-        "text_sliding_window": config_used["text_sliding_window"],
-        "recompute": config_used["recompute"],
-        "duration_tested_sec": duration
-    }
-    out_dir = os.path.join("output", "efficiency")
-    os.makedirs(out_dir, exist_ok=True)
-    auto_name = f"{_safe(meta['mode'])}__{_safe(meta['model_base'])}__{_safe(meta['model_path'])}__{_safe(os.environ.get('QWENVL_FPS', '2.0'))}___{_safe(os.path.basename(meta['video_path']))}__s{meta['skip_first_chunk']}__w{meta['window_size']}__c{meta['chunk_duration']}__t{meta['text_round']}__{meta['timestamp']}.json"
-    result_path = os.path.join(out_dir, auto_name)
-    payload = {
-        "meta": meta,
-        "per_chunk": records,
-        "summary": {
-            "num_chunks": num_chunks,
-            "avg_gen_time_sec": float(sum(r["gen_time_sec"] for r in records) / max(num_chunks, 1)),
-            "avg_gen_time_per_token": float(
-                sum((r["gen_time_per_token"] or 0.0) for r in records if r["gen_time_per_token"] is not None)
-                / max(len([r for r in records if r["gen_time_per_token"] is not None]), 1)
-            )
+
+    mode_str = "baseline_a" if baseline_mode == "a" else "baseline_b" if baseline_mode == "b" else "baseline_c" if baseline_mode == "c" else "streaming"
+
+    def save_results(partial=False):
+        chunk_dur = config_used["chunk_duration"]
+        num_chunks = len(time_results)
+        if num_chunks == 0:
+            print("[WARN] No chunks to save.")
+            return
+        records = []
+        for i, sec_time in enumerate(time_results):
+            gen_t = float(sec_time.get("GEN", 0.0))
+            dec = int(token_decoded_nums[i]) if i < len(token_decoded_nums) else 0
+            t_start = i * chunk_dur
+            video_len = (i + 1) * chunk_dur
+            records.append({
+                "chunk_index": i,
+                "time_start_sec": t_start,
+                "video_len_sec": video_len,
+                "gen_time_sec": gen_t,
+                "decoded_tokens": dec,
+                "gen_time_per_token": (gen_t / dec) if dec > 0 else None
+            })
+        meta = {
+            "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "partial": partial,
+            "model_path": args.model_path,
+            "model_base": args.model_base,
+            "video_path": args.video_path,
+            "pos_mode": args.pos_mode,
+            "all_text": args.all_text,
+            "temperature": args.temperature,
+            "mode": mode_str,
+            "window_size": config_used["window_size"],
+            "chunk_duration": config_used["chunk_duration"],
+            "text_round": config_used["text_round"],
+            "text_sink": config_used["text_sink"],
+            "text_sliding_window": config_used["text_sliding_window"],
+            "recompute": config_used["recompute"],
+            "duration_tested_sec": num_chunks * chunk_dur
         }
-    }
-    with open(result_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    print(f"[OK] saved efficiency json -> {result_path}")
-    print(token_decoded_nums)
+        out_dir = os.path.join("output", "efficiency")
+        os.makedirs(out_dir, exist_ok=True)
+        suffix = "_partial" if partial else ""
+        auto_name = f"{_safe(mode_str)}__{_safe(meta['model_base'])}__{_safe(meta['model_path'])}__{_safe(os.environ.get('QWENVL_FPS', '2.0'))}___{_safe(os.path.basename(meta['video_path']))}__w{meta['window_size']}__c{meta['chunk_duration']}__t{meta['text_round']}__{meta['timestamp']}{suffix}.json"
+        result_path = os.path.join(out_dir, auto_name)
+        payload = {
+            "meta": meta,
+            "per_chunk": records,
+            "summary": {
+                "num_chunks": num_chunks,
+                "avg_gen_time_sec": float(sum(r["gen_time_sec"] for r in records) / max(num_chunks, 1)),
+                "avg_gen_time_per_token": float(
+                    sum((r["gen_time_per_token"] or 0.0) for r in records if r["gen_time_per_token"] is not None)
+                    / max(len([r for r in records if r["gen_time_per_token"] is not None]), 1)
+                )
+            }
+        }
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        status = "[PARTIAL]" if partial else "[OK]"
+        print(f"{status} saved efficiency json -> {result_path}")
+
+    try:
+        for i in range(0, duration, chunk):
+            args.skip_first_chunk = i
+            time_result = streaming_inference(**args.__dict__, **config_used, duration=chunk, time_test=True, quiet=False)
+            token_decoded_num = [r.get('decoded_tokens', 0) for r in time_result]
+
+            import gc; torch.cuda.synchronize()
+            gc.collect()
+            torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+            time_results.extend(time_result)
+            token_decoded_nums.extend(token_decoded_num)
+        save_results(partial=False)
+    except Exception as e:
+        print(f"\n[ERROR] Run failed: {e}")
+        print(f"[INFO] Saving partial results ({len(time_results)} chunks collected so far)...")
+        save_results(partial=True)
