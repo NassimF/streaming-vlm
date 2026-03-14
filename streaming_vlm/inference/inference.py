@@ -490,6 +490,7 @@ def streaming_inference(model_path="",
             
 
         _sync();section_time['POST'] += (time.perf_counter() - _t)
+        section_time['decoded_tokens'] = newly_generated_ids.shape[-1]
 
         # ------------------------- Print profiling results -----------------
         _sync()
