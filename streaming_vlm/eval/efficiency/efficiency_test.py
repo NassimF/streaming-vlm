@@ -21,6 +21,7 @@ baseline_b_config = {
     "text_sink": None,
     "text_sliding_window": None,
     "recompute": False,
+    "hard_reset_interval": 100,  # full KV cache clear every 100 chunks = non-overlapping window
 }
 # (c) Sliding window w/ overlapping in paper
 baseline_c_config = {

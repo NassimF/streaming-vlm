@@ -204,7 +204,8 @@ def streaming_inference(model_path="",
                         quiet=False,
                         emit_json=False,
                         time_test = False,
-                        ): 
+                        hard_reset_interval = None,
+                        ):
     def _sync():
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -312,6 +313,14 @@ def streaming_inference(model_path="",
         section_time = {k: 0.0 for k in ['PKV', 'CHECK', 'VIDEO', 'INPUT', 'GEN', 'POST']}
     
         start_time = (i + skip_first_chunk) * chunk_duration 
+
+        ########################## Hard reset (non-overlapping window baseline) ##############
+        if hard_reset_interval and i > 0 and i % hard_reset_interval == 0:
+            past_key_values = None
+            prev_generated_ids = None
+            recent_video_window_clips = []
+            recent_pixel_values_videos = []
+            full_conversation_history = []
 
         ########################## Handle past_key_values ###################################
         _sync(); _t = time.perf_counter()
