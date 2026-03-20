@@ -49,6 +49,36 @@ Each entry should include:
 **Why:** `--no-deps` skips dependency installs, so `flash_attn` fails to build because `torch` isn't present. Pre-built wheel avoids the build entirely.
 **Result:** Worked. Verified: torch 2.7.1+cu126, flash_attn 2.8.3.
 
+### 2026-03-14
+**File:** `streaming_vlm/inference/inference.py`, `streaming_vlm/eval/efficiency/efficiency_test.py`
+**Change:** Added `decoded_tokens` tracking per chunk. `inference.py` now stores `section_time['decoded_tokens'] = newly_generated_ids.shape[-1]` after generation. `efficiency_test.py` reads this to compute `gen_time_per_token` in the output JSON.
+**Why:** Token counts were hardcoded to zero (workaround from the unpack bug fix). Without real token counts, `gen_time_per_token` is None — making the Y-axis incompatible with the paper's Figure 7.
+**Result:** Output JSONs now include per-chunk token counts and valid `gen_time_per_token` values.
+
+### 2026-03-14
+**File:** `streaming_vlm/eval/efficiency/efficiency_test.py`
+**Change:** Wrapped inference loop in `try/except` with `save_results(partial=True)` in the except block. Extracted save logic into a reusable `save_results()` helper.
+**Why:** Mode a (Full Attention) OOMs at chunk ~698, crashing before the JSON save at the end of the script. All timing data was lost on crash.
+**Result:** On OOM or any other exception, a `*_partial.json` file is saved with all chunks collected up to the crash point.
+
+### 2026-03-14
+**File:** `streaming_vlm/inference/inference.py`
+**Change:** Added `hard_reset_interval=None` parameter. When set to an integer N, the KV cache, conversation history, and video window are fully cleared every N chunks.
+**Why:** The paper's mode b (Sliding Window w/o Overlapping) uses non-overlapping windows with a hard cache reset between windows, producing the sawtooth latency pattern in Figure 7. The original implementation used continuous sliding eviction, producing a flat line instead.
+**Result:** `baseline_b_config` in `efficiency_test.py` now sets `hard_reset_interval=100` to reproduce the paper's sawtooth.
+
+### 2026-03-14
+**File:** `streaming_vlm/eval/efficiency/plot_efficiency.py`
+**Change:** Capped Y-axis at 0.7 s/token to match the paper's Figure 7 scale.
+**Why:** Without the cap, partial mode a data (high raw gen_time_sec values with low token counts) dominated the Y-axis scale and compressed the b/c/d lines into noise.
+**Result:** Plot now matches the paper's Y-axis range.
+
+### 2026-03-20
+**File:** `AGENTS.md` (new file)
+**Change:** Created `AGENTS.md` with project goal, repo structure, key paths, conda environments, environment variables, and git reminder instruction.
+**Why:** Provides persistent context for AI agents working in this repo across sessions.
+**Result:** Future sessions start with full project context.
+
 ---
 
 ## Progress Log
@@ -89,43 +119,20 @@ Time=00:00:18-00:00:19:  captain Patrick Kane will get back out there ...       
 
 ## TODO — Next Steps (pick up from here)
 
-1. **Verify downloads completed** — check that these exist:
-   - `/workspace/storage_nassim/models/StreamingVLM`
-   - `/workspace/storage_nassim/datasets/Inf-Stream-Eval`
-   - `/workspace/storage_nassim/datasets/Inf-Stream-Train`
+### Completed ✅
+- Inference sanity check (NHL video, ~20 chunks)
+- Efficiency benchmark: modes b, c, d (full 1000s runs with token counts)
+- Efficiency benchmark: mode a (partial ~698 chunks, OOM confirmed)
+- Efficiency plot: `gen_time_per_token` vs video length (matches paper Figure 7 qualitatively)
 
-2. **Run inference test** (needs GPUs + downloads done):
-   ```bash
-   conda activate streamingvlm-infer
-   cd /workspace/storage_nassim/StreamingVLM
-   export EVAL_DATASET_PATH=/workspace/storage_nassim/datasets/Inf-Stream-Eval
-   python streaming_vlm/inference/inference.py \
-     --model_path /workspace/storage_nassim/models/StreamingVLM
-   ```
-   Output: `.vtt` subtitle file in `output/`
+### In Progress / Up Next
+1. **SFT Training** (current focus):
+   - Download `.jsonl` annotation files from `mit-han-lab/Inf-Stream-Train`
+   - Download LiveCC dataset (`chenjoya/Live-WhisperX-526K`) + flatten
+   - Adapt `scripts/sft_stage_1.sh` and `scripts/sft_stage_2.sh` for 2 GPUs
+   - Run Stage 1, then Stage 2
 
-3. **Run efficiency benchmark**:
-   ```bash
-   python streaming_vlm/eval/efficiency/efficiency_test.py --baseline_mode d
-   ```
-
-4. **Run Inf-Stream-Eval** (needs OpenAI API key):
-   ```bash
-   ./streaming_vlm/eval/model_compete/generate.sh -m mit-han-lab/StreamingVLM -b Qwen
-   ./streaming_vlm/eval/model_compete/merge.sh mit-han-lab/StreamingVLM
-   ./streaming_vlm/eval/model_compete/score.sh --model1 "mit-han-lab/StreamingVLM" --model2 "gpt-4o-mini"
-   ```
-
-5. **Set dataset paths** in SFT scripts before training:
-   - `scripts/sft_stage_1.sh` → set `DATASET_PATH`
-   - `scripts/sft_stage_2.sh` → set `DATASET_PATH` and `model_name` (Stage 1 checkpoint)
-
-6. **SFT Stage 1** → **SFT Stage 2** (needs 2x A100s + full dataset)
-
-<!-- Example:
-### 2026-03-12
-**File:** `scripts/sft_stage_1.sh`
-**Change:** Set `DATASET_PATH` to `/workspace/storage_nassim/datasets/Inf-Stream-Train`
-**Why:** Placeholder path needed to be set for local setup
-**Result:** Training launched successfully
--->
+2. **Remaining inference evals** (deferred):
+   - Inf-Stream-Eval (GPT-4o-mini judge, OpenAI API key ready)
+   - VQA evaluation (VLMEvalKit)
+   - OVOBench (`streamingvlm-ovo` env)

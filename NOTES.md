@@ -21,9 +21,20 @@ Personal learning log for understanding StreamingVLM and related concepts.
 ### SFT Pipeline
 - **Stage 1**: trains on streaming captions (s12w24 format) + LiveCC commentary data
   - text_sink=512, text_sliding_window=512
+  - `s12w24` = visual sink of 12 frames + visual window of 24 frames used when generating the annotation data
+  - Teaches the model to do continuous streaming commentary over long videos (coarse-grained)
 - **Stage 2**: high-quality annealing on fine-grained QA data (`fg/` split)
+  - Fine-tunes Stage 1 checkpoint on precise Q&A about events in the video
+  - Sharpens factual accuracy on top of Stage 1's streaming capability
 - Training simulates streaming: video → multi-turn dialogue, one chunk of frames per turn
 - `preprocess_conversation_stream()` in `lmm_dataset.py` handles this conversion
+
+### GPU Adaptation (8 → 2 GPUs)
+- The paper and training scripts assume 8 GPUs (8× H100s)
+- We have 2× A100 80GB
+- To maintain the same effective batch size of 512: `8 GPUs × 1 batch × 64 accum = 512`
+- With 2 GPUs: `2 × 1 × 256 accum = 512` — so gradient_accumulation_steps must increase to 256
+- This keeps the training mathematics identical but makes each optimizer step 4× slower → ~4× longer total training time
 
 ### Key Parameters
 - `text_sink`: number of sink tokens kept from beginning of previous context
@@ -110,6 +121,55 @@ Personal learning log for understanding StreamingVLM and related concepts.
 - [ ] How exactly does `shrink` mode remap position IDs? See `pos_emb.py`
 - [ ] What is the `s12w24` naming convention in dataset files? (sink=12? window=24?)
 - [ ] How does liger kernel patch interact with the model forward pass?
+
+---
+
+---
+
+## Presentation Notes
+
+### Efficiency Benchmark Plots
+
+- **Qestion:** Does this mode slow down as the video gets longer?
+
+**Plot 1 — Generation time per chunk**
+
+![efficiency_plot](output/efficiency/efficiency_plot.png)
+
+**Plot 2 — Generation time per token**
+
+![efficiency_plot_per_token](output/efficiency/efficiency_plot_per_token.png)
+
+#### Difference between the two plots
+
+
+
+Both plots show the same 4 inference modes (a/b/c/d) over 1000 seconds of video. The only difference is what is on the Y-axis:
+
+| | Plot 1 | Plot 2 |
+|---|---|---|
+| Y-axis | `gen_time_sec` — total seconds the model spent generating text for that 1-second chunk | `gen_time_per_token` — generation time divided by the number of tokens produced |
+| Real-time threshold | 1.0s (one chunk = one second of video) | 0.1s/token (paper's threshold) |
+| Matches paper | No | Yes |
+
+**Note on mode b (Sliding Window w/o Overlapping):** In the paper, mode b shows a sawtooth pattern which means the KV cache accumulates for 100 seconds, then gets fully wiped, causing latency to drop and rise again periodically. The released GitHub code does not include this hard-reset functionality, so my reproduction produces a flat cumulative line instead. 
+#### Why per-token is the better metric
+
+Each 1-second video chunk does not produce the same number of tokens. A quiet moment (no action) might produce 3–4 tokens (`"..."`), while an eventful second generates 12–15 tokens (`"He puts his hand up deliberately."`).
+
+Dividing by token count normalizes for this variability and isolates the **attention cost** — the part that actually differs between modes. 
+
+The paper uses `gen_time_per_token` to demonstrate that StreamingVLM maintains **constant-time inference** regardless of video length, staying below the 0.1s/token real-time threshold — unlike full attention which degrades and eventually OOMs. 
+
+#### Why there is a spike in the second graph at the beginning for StreamingVLM?
+
+The initial spike above 0.1s/token for mode d is caused by CUDA warm-up on the first chunk. 
+- Chunk 0 is the first ever forward pass — CUDA kernels need to be compiled and loaded into GPU memory for the first time. This is a one-time fixed cost that has nothing to do with the attention mechanism.
+
+- With smooth=10, this warm-up cost gets averaged into chunks 1–9 as well, stretching the elevated region further.
+After ~50 seconds, mode d settles to ~0.05s/token and stays flat below the threshold — consistent with the paper.
+
+The authors probably Discarded the first N chunks as a warm-up period before recording timing
 
 ---
 
