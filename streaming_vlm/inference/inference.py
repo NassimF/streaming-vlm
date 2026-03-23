@@ -524,7 +524,7 @@ def streaming_inference(model_path="",
         ts_end = sec2ts(start_time + chunk_duration)
         if output_dir is not None:
             with open_vtt(output_dir) as vf:
-                vf.write(f"{ts_start} --> {ts_end}\n Infer Time: {loop_total:.3f}s\n {response}\n\n")
+                vf.write(f"{ts_start} --> {ts_end}\n{response}\n\n")
     if output_dir is not None:
         printq(f"\n✅ Subtitles saved to: {output_dir}\n", quiet=quiet)
     if time_test:

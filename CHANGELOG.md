@@ -79,6 +79,30 @@ Each entry should include:
 **Why:** Provides persistent context for AI agents working in this repo across sessions.
 **Result:** Future sessions start with full project context.
 
+### 2026-03-20
+**File:** `scripts/sft_stage_1.sh`, `scripts/sft_stage_2.sh`
+**Change:** Adapted both scripts for 2-GPU setup: `--nproc_per_node=8` → `2`, `gradient_accumulation_steps=64` → `256`, `DATASET_PATH` set to actual path, `--dataloader_num_workers 32` → `4`, switched from WandB to `--report_to tensorboard`, removed WandB env vars from torchrun command.
+**Why:** Paper uses 8× H100; we have 2× A100. Accumulation steps scaled to preserve effective batch size of 512. WandB personal entity disabled on this account.
+**Result:** Scripts runnable on 2-GPU setup.
+
+### 2026-03-20
+**File:** `scripts/sft_stage_1.sh`
+**Change:** Reduced `FPS_MAX_FRAMES` from 480 to 64, reduced `VIDEO_MAX_PIXELS` from 19267584 to 6422528.
+**Why:** Original values caused CUDA OOM during first batch — too many frames × too high resolution = activations exceeded 80 GB VRAM.
+**Result:** Forward pass completes without OOM.
+
+### 2026-03-20
+**File:** `streaming_vlm/utils/patch_liger_kernel.py` lines 83, 155-167, 173, 256
+**Change:** Updated attribute paths for transformers 4.52.x API change in Qwen2.5-VL: `self.model.embed_tokens` → `self.model.language_model.embed_tokens`; `self.rope_deltas` → `self.model.rope_deltas`; `self.get_rope_index(...)` → `self.model.get_rope_index(...)`.
+**Why:** In transformers 4.52, `Qwen2_5_VLModel` was refactored — the language model part moved into `self.model.language_model` (a `Qwen2_5_VLTextModel`), so `embed_tokens` and `rope_deltas` are no longer directly on `self.model`.
+**Result:** `AttributeError: 'Qwen2_5_VLModel' object has no attribute 'embed_tokens'` fixed.
+
+### 2026-03-20
+**File:** `scripts/zero3.json`
+**Change:** Added `"offload_optimizer": {"device": "cpu", "pin_memory": true}` to the ZeRO-3 config.
+**Why:** Adam optimizer states for 8.29B params require ~33 GB per GPU (sharded across 2). Combined with model activations this exceeds 80 GB A100 VRAM, causing OOM at the first optimizer step.
+**Result:** Optimizer states offloaded to CPU RAM; training fits within VRAM at cost of some speed.
+
 ---
 
 ## Progress Log
@@ -124,15 +148,119 @@ Time=00:00:18-00:00:19:  captain Patrick Kane will get back out there ...       
 - Efficiency benchmark: modes b, c, d (full 1000s runs with token counts)
 - Efficiency benchmark: mode a (partial ~698 chunks, OOM confirmed)
 - Efficiency plot: `gen_time_per_token` vs video length (matches paper Figure 7 qualitatively)
+- SFT env setup (`streamingvlm-sft`: torch 2.7.1, transformers 4.52.4, deepspeed 0.17.1, flash_attn 2.8.3)
+- Adapted `sft_stage_1.sh` and `sft_stage_2.sh` for 2 GPUs (nproc=2, accum=256, tensorboard)
+- Downloaded all `.jsonl` annotation files from `mit-han-lab/Inf-Stream-Train`
+- Created filtered training set: `train_s12w24_local_with_seeks.jsonl` (19,409 samples, local videos only)
+- **SFT Stage 1 training — COMPLETED ✅** (2026-03-20, 38 optimizer steps, loss 2.76→1.96)
+  - Checkpoint: `./checkpoints/StreamingVLM_SFT_stage_1_e1_lr1e-5_ps512_pw512_20260320_083527/checkpoint-38/`
 
-### In Progress / Up Next
-1. **SFT Training** (current focus):
-   - Download `.jsonl` annotation files from `mit-han-lab/Inf-Stream-Train`
-   - Download LiveCC dataset (`chenjoya/Live-WhisperX-526K`) + flatten
-   - Adapt `scripts/sft_stage_1.sh` and `scripts/sft_stage_2.sh` for 2 GPUs
-   - Run Stage 1, then Stage 2
+### Up Next — Stage 2 (GPU temporarily unavailable as of 2026-03-20)
 
-2. **Remaining inference evals** (deferred):
+1. **Filter fg/ dataset to local videos** (same issue as Stage 1 — many videos missing locally):
+   ```bash
+   /root/miniconda3/envs/streamingvlm-sft/bin/python3 -c "
+   import json, os, random, pathlib
+   dataset_root = '/workspace/storage_nassim/datasets/Inf-Stream-Train'
+   for split in ['train', 'valid']:
+       src = f'{dataset_root}/fg/{split}_fg_with_seeks.jsonl'
+       lines = pathlib.Path(src).read_text().splitlines()
+       kept = [l for l in lines if os.path.exists(os.path.join(dataset_root, json.loads(l)[0]['content'][0]['video']))]
+       out = f'{dataset_root}/fg/{split}_fg_local_with_seeks.jsonl'
+       pathlib.Path(out).write_text('\n'.join(kept) + '\n')
+       seeks = []
+       with open(out, 'rb') as f:
+           while True:
+               pos = f.tell(); line = f.readline()
+               if not line: break
+               seeks.append(pos)
+       json.dump(seeks, open(f'{dataset_root}/fg/{split}_fg_local_seeks.jsonl', 'w'))
+       print(f'{split}: {len(kept)}/{len(lines)} kept')
+   "
+   ```
+
+2. **Update Stage 2 script** — set `model_name` and dataset names:
+   - In `scripts/sft_stage_2.sh`:
+     - `model_name` → `"/workspace/storage_nassim/StreamingVLM/checkpoints/StreamingVLM_SFT_stage_1_e1_lr1e-5_ps512_pw512_20260320_083527/checkpoint-38"`
+     - Change `TRAIN_DATASET_NAMES` to `"fg/train_fg_local_with_seeks.jsonl"`
+     - Change `VALID_DATASET_NAMES` to `"fg/valid_fg_local_with_seeks.jsonl"`
+     - Add `FPS_MAX_FRAMES=64` and `VIDEO_MAX_PIXELS=6422528` (same as Stage 1 to avoid OOM)
+     - Change `--report_to wandb` → `--report_to tensorboard`
+
+3. **Run Stage 2**:
+   ```bash
+   cd /workspace/storage_nassim/StreamingVLM
+   export PYTHONPATH=/workspace/storage_nassim/StreamingVLM:$PYTHONPATH
+   conda activate streamingvlm-sft
+   bash scripts/sft_stage_2.sh
+   ```
+
+4. **Remaining inference evals** (deferred):
    - Inf-Stream-Eval (GPT-4o-mini judge, OpenAI API key ready)
    - VQA evaluation (VLMEvalKit)
    - OVOBench (`streamingvlm-ovo` env)
+
+### Known Bugs Fixed (2026-03-20 session)
+- `train_s12w24_10pct_seeks.jsonl` missing → generated seeks for subsampled jsonl
+- `liger_kernel 0.7.0` requires `transformers>=4.52` → upgraded from 4.51.3
+- WandB personal entity disabled → switched to `--report_to tensorboard`
+- Missing videos caused infinite retry recursion in dataloader → filtered to local-only videos
+- CUDA OOM on first batch → reduced `FPS_MAX_FRAMES` 480→64, `VIDEO_MAX_PIXELS` 19267584→6422528
+- `Qwen2_5_VLModel` no longer has `embed_tokens` in transformers 4.52 → patched `patch_liger_kernel.py` to use `self.model.language_model.embed_tokens`, `self.model.rope_deltas`, `self.model.get_rope_index`
+
+---
+
+## Streaming Log
+
+### 2026-03-23 — Real-Time Demo Created ✅
+
+**Goal:** Browser-based demo for advisor showing live commentary subtitles generated by the model as a video plays.
+
+**Files created:**
+
+| File | Purpose |
+|---|---|
+| `demo/server.py` | Python stdlib HTTP server — no extra dependencies |
+| `demo/index.html` | Self-contained browser UI with live subtitle polling |
+| `demo/run_demo.sh` | One-command launcher |
+| `Streaming Inference Demo Plan.md` | Architecture and design notes |
+
+**Architecture:**
+```
+bash demo/run_demo.sh
+  └── demo/server.py (ThreadingHTTPServer, port 8765)
+        ├── GET  /               → index.html
+        ├── GET  /video          → video file with HTTP 206 range support
+        ├── GET  /subtitles.vtt  → live VTT (fresh read, Cache-Control: no-cache)
+        ├── GET  /status         → {"running": bool, "cues": int}
+        └── POST /start          → spawn inference.py subprocess
+
+Browser (Mac)
+  └── index.html
+        ├── <video src="/video">
+        ├── Start button → POST /start → poll subtitles every 500ms
+        └── Blob URL swap on each poll (forces browser to reload <track>)
+```
+
+**Key design decisions:**
+- Python stdlib only — zero extra dependencies
+- HTTP range requests (206 Partial Content) required for Chrome/Safari `<video>` seeking
+- Blob URL swap: browsers cache `<track src="...">` aggressively; swapping Blob URLs forces reload
+- Poll every 500ms: inference writes one cue/second at ~0.2–0.6s/chunk (faster than real-time)
+- `waitForFirstCue()` waits for first subtitle before starting video playback for A/V sync
+
+**Launch command:**
+```bash
+conda activate streamingvlm-infer
+cd /workspace/storage_nassim/StreamingVLM
+bash demo/run_demo.sh
+# Open http://<server-ip>:8765 on Mac, click Start Inference
+```
+
+**Status:** Files created and tested successfully end-to-end.
+
+### 2026-03-23 — Removed timing metadata from VTT output
+**File:** `streaming_vlm/inference/inference.py` line 527
+**Change:** Removed `Infer Time: {loop_total:.3f}s\n` prefix from each VTT cue.
+**Why:** Timing metadata was being written into the subtitle text and displayed on screen during the browser demo instead of clean commentary.
+**Result:** Subtitles now show only the model's commentary text.

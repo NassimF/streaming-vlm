@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StreamingVLM Live Commentary Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f0f;
+      color: #e8e8e8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+      min-height: 100vh;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      margin-bottom: 1.2rem;
+      color: #fff;
+    }
+
+    h1 span {
+      color: #e05050;
+    }
+
+    .video-wrapper {
+      position: relative;
+      width: 90vw;
+      max-width: 1280px;
+    }
+
+    video {
+      width: 100%;
+      border-radius: 10px;
+      background: #000;
+      display: block;
+    }
+
+    /* Style native subtitles */
+    video::cue {
+      background: rgba(0, 0, 0, 0.75);
+      color: #ffffff;
+      font-size: 1.1em;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .controls {
+      margin-top: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    button {
+      padding: 0.6rem 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      background: #e05050;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover { background: #c03030; }
+    button:disabled { background: #555; cursor: default; }
+
+    #status {
+      font-size: 0.9rem;
+      color: #aaa;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #555;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .dot.running { background: #4caf50; animation: pulse 1s infinite; }
+    .dot.loading { background: #ff9800; animation: pulse 0.6s infinite; }
+    .dot.done    { background: #4caf50; animation: none; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    #cue-count {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.4rem;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>StreamingVLM <span>Live Commentary</span></h1>
+
+  <div class="video-wrapper">
+    <video id="v" controls>
+      <source src="/video" type="video/mp4">
+      Your browser does not support the video element.
+    </video>
+  </div>
+
+  <div class="controls">
+    <button id="startBtn" onclick="startDemo()">Start Inference</button>
+    <div>
+      <div id="status"><span class="dot" id="dot"></span>Click Start to begin</div>
+      <div id="cue-count"></div>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('v');
+    const statusEl = document.getElementById('status');
+    const dotEl = document.getElementById('dot');
+    const cueCountEl = document.getElementById('cue-count');
+    const startBtn = document.getElementById('startBtn');
+
+    let pollInterval = null;
+    let currentBlobUrl = null;
+    let lastCueCount = 0;
+
+    async function startDemo() {
+      startBtn.disabled = true;
+      setStatus('loading', 'Starting inference (loading model ~1 min)...');
+
+      try {
+        const resp = await fetch('/start', { method: 'POST' });
+        const data = await resp.json();
+        console.log('Start response:', data);
+      } catch (e) {
+        setStatus('error', 'Failed to start inference: ' + e.message);
+        startBtn.disabled = false;
+        return;
+      }
+
+      // Start polling for subtitles
+      pollInterval = setInterval(pollSubtitles, 500);
+
+      // Start polling status separately to detect model-loaded state
+      setTimeout(waitForFirstCue, 2000);
+    }
+
+    async function waitForFirstCue() {
+      // Poll /status until we see the first cue written, then start playing
+      try {
+        const resp = await fetch('/status');
+        const data = await resp.json();
+        if (data.cues > 0) {
+          setStatus('running', 'Inference running...');
+          video.play();
+        } else if (data.running) {
+          setStatus('loading', 'Model loaded, waiting for first cue...');
+          setTimeout(waitForFirstCue, 1000);
+        } else {
+          // Not started yet, keep waiting
+          setTimeout(waitForFirstCue, 1000);
+        }
+      } catch (e) {
+        setTimeout(waitForFirstCue, 2000);
+      }
+    }
+
+    async function pollSubtitles() {
+      try {
+        // Cache-bust with timestamp so browser never caches this request
+        const resp = await fetch('/subtitles.vtt?t=' + Date.now());
+        if (!resp.ok) return;
+        const text = await resp.text();
+
+        // Count cues for status display
+        const cues = (text.match(/-->/g) || []).length;
+        if (cues !== lastCueCount) {
+          lastCueCount = cues;
+          cueCountEl.textContent = `${cues} subtitle cue${cues !== 1 ? 's' : ''} generated`;
+        }
+
+        // Swap the <track> element with a fresh Blob URL
+        // (Direct <track src="..."> is cached aggressively by browsers)
+        swapTrack(text);
+
+        // Check if inference is done
+        checkStatus();
+
+      } catch (e) {
+        // Network error — keep polling
+      }
+    }
+
+    function swapTrack(vttText) {
+      // Remove existing track
+      const oldTrack = video.querySelector('track');
+      const oldUrl = currentBlobUrl;
+
+      // Create new Blob URL
+      const blob = new Blob([vttText], { type: 'text/vtt' });
+      const url = URL.createObjectURL(blob);
+      currentBlobUrl = url;
+
+      // Add new track
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.label = 'Commentary';
+      track.srclang = 'en';
+      track.src = url;
+      track.default = true;
+      if (oldTrack) oldTrack.remove();
+      video.appendChild(track);
+
+      // Force the track to show (Chrome requires explicit activation)
+      if (video.textTracks.length > 0) {
+        video.textTracks[0].mode = 'showing';
+      }
+
+      // Revoke old URL after a delay to avoid memory leaks
+      if (oldUrl) {
+        setTimeout(() => URL.revokeObjectURL(oldUrl), 5000);
+      }
+    }
+
+    async function checkStatus() {
+      try {
+        const resp = await fetch('/status');
+        const data = await resp.json();
+        if (!data.running && lastCueCount > 0) {
+          // Inference finished
+          clearInterval(pollInterval);
+          setStatus('done', `Done — ${lastCueCount} cues generated`);
+        }
+      } catch (e) {}
+    }
+
+    function setStatus(state, message) {
+      dotEl.className = 'dot ' + (state === 'error' ? '' : state);
+      statusEl.innerHTML = `<span class="dot ${state === 'error' ? '' : state}" id="dot"></span>${message}`;
+    }
+  </script>
+
+</body>
+</html>

@@ -80,7 +80,7 @@ def lce_forward(
     return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
     if inputs_embeds is None:
-        inputs_embeds = self.model.embed_tokens(input_ids)
+        inputs_embeds = self.model.language_model.embed_tokens(input_ids)
         if pixel_values is not None:
             pixel_values = pixel_values.type(self.visual.dtype)
             image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
@@ -154,23 +154,23 @@ def lce_forward(
         # calculate RoPE index once per generation in the pre-fill stage only
         if (
             (cache_position is not None and cache_position[0] == 0)
-            or self.rope_deltas is None
+            or self.model.rope_deltas is None
             or (past_key_values is None or past_key_values.get_seq_length() == 0) # This is added from qwen. Reason: during training, model.rope_deltas is no longer none after the first epoch
         ):
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
                 second_per_grid_ts,
                 attention_mask,
             )
-            self.rope_deltas = rope_deltas
+            self.model.rope_deltas = rope_deltas
             # if position_ids.shape[2]!=1:
             #     print("branch 1")
         # then use the prev pre-calculated rope-deltas to get the correct position ids
         else:
             batch_size, seq_length, _ = inputs_embeds.shape
-            delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device) if cache_position is not None else 0
+            delta = (cache_position[0] + self.model.rope_deltas).to(inputs_embeds.device) if cache_position is not None else 0
             position_ids = torch.arange(seq_length, device=inputs_embeds.device)
             position_ids = position_ids.view(1, -1).expand(batch_size, -1)
             if cache_position is not None:  # otherwise `deltas` is an int `0`
@@ -253,5 +253,5 @@ def lce_forward(
         past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
-        rope_deltas=rope_deltas,
+        rope_deltas=self.model.rope_deltas,
     )

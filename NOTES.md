@@ -112,17 +112,12 @@ Personal learning log for understanding StreamingVLM and related concepts.
 
 ### Hardware
 - Paper uses H100s, achieves up to 8 FPS
-- Our setup: 2x A100s (temporarily unavailable as of 2026-03-12)
+- Our setup: 2x A100s 
 
----
 
-## Questions / Things to Look Up
 
-- [ ] How exactly does `shrink` mode remap position IDs? See `pos_emb.py`
-- [ ] What is the `s12w24` naming convention in dataset files? (sink=12? window=24?)
-- [ ] How does liger kernel patch interact with the model forward pass?
 
----
+
 
 ---
 
@@ -170,6 +165,80 @@ The initial spike above 0.1s/token for mode d is caused by CUDA warm-up on the f
 After ~50 seconds, mode d settles to ~0.05s/token and stays flat below the threshold — consistent with the paper.
 
 The authors probably Discarded the first N chunks as a warm-up period before recording timing
+
+### Inference Process
+
+#### Are there two separate KV caches?
+
+**No — there is only ONE KV cache**, belonging to the language model. Here's the full picture:
+
+**Vision Encoder — No KV cache**
+The vision encoder is stateless. Each chunk of frames is processed fresh through `streaming_visual_encoder_forward()` ([vision_forward.py:104](streaming_vlm/inference/qwen2_5/vision_forward.py#L104)), which returns only visual **embeddings** — no KV states are stored or reused.
+
+**Language Model — One unified KV cache**
+The `StreamingCache` class ([streaming_cache.py](streaming_vlm/inference/generate/streaming_cache.py)) holds a single unified cache with `key_cache[layer]` and `value_cache[layer]` for every LM layer. This cache stores **both** visual tokens and text tokens together — they are merged into one `inputs_embeds` sequence ([model_forward.py:93](streaming_vlm/inference/qwen2_5/model_forward.py#L93)) before the LM ever sees them.
+
+**How eviction works on the single cache**
+`process_past_kv()` ([inference.py:87-172](streaming_vlm/inference/inference.py#L87)) manages everything by token position:
+
+| What gets evicted | When | Parameters |
+|---|---|---|
+| Old **visual** tokens | Every chunk after `visual_round` | `Vwindow = 16s` |
+| Old **text** tokens (middle) | Every chunk after `text_round` | `Tsink=512, Twindow=512` |
+
+Both use the same `prune_id_and_kv_cache()` function ([inference.py:50-61](streaming_vlm/inference/inference.py#L50)).
+
+**Paper confirmation (page 3):**
+> *"we reuse the states of (i) a set of sink text tokens of length Tsink; (ii) a long window of the most recent text tokens of length Twindow; and (iii) a short window of the most recent vision tokens of length Vwindow."*
+
+All three refer to regions of the **same** KV cache — they are just different logical sections of it.
+
+### Sample video Inference
+
+- Saved at:/workspace/storage_nassim/StreamingVLM/output/_workspace_storage_nassim_models_StreamingVLM_viswin16_txtwin16_prvsink512_prvwin512_tprt0.9.vtt
+
+- viswin16 — visual sliding window = 16. The seconds of visual context kept in the visual KV cache. Older frames beyond the last 16 get evicted.
+
+- txtwin16 — text sliding window = 16 tokens kept from recent text context in the visual KV cache side.
+
+- prvsink512 — previous text sink = 512. The number of tokens from the very beginning of the generated text that are always kept (the "anchor" tokens that stabilize attention).
+
+- prvwin512 — previous text sliding window = 512. The most recent 512 generated text tokens kept in the rolling context. Together with prvsink512, the total text context is capped at 1024 tokens no matter how long the video is.
+
+- tprt0.9 — temperature = 0.9. Controls randomness in token sampling during generation. 0.9 is slightly below 1.0 (fully random), making the output a bit more focused while still allowing variation. 
+
+
+
+### Training
+
+#### Changes I made
+- Sports SFT set: In paper->	525K samples	Mine: 19,409 (local videos only, ~3.7%) because it would take days on my weaker gpu. (Paper took 128 H100 days for full training)
+- Did not use the LiveCC dataset because it was too large. In total paper used 1M samples but I used 19k
+-  Hit OOM so reduced FPS_MAX_FRAMES from 480 → 64 (fewer frames per video clip) and Reduced VIDEO_MAX_PIXELS from 19M → 6.4M (lower resolution per frame). This shrunk the activation tensors that had to be held during the forward pass
+-  Adam optimizer states for 8.29B params require ~33 GB per GPU (sharded across 2). Combined with model activations this exceeds 80 GB A100 VRAM, causing OOM at the first optimizer step. Solution:Optimizer states offloaded to CPU RAM; training fits within VRAM at cost of some speed.
+- gradient_accumulation_steps: 64 → 256 (to compensate for 2 GPUs vs 8)
+
+#### Result
+- 'train_runtime': 52039.5793, 'train_samples_per_second': 0.373, 'train_steps_per_second': 0.001, 'train_loss': 2.0986071323093616, 'epoch': 1.0
+
+- Visualize :conda activate streamingvlm-sft
+tensorboard --logdir /workspace/storage_nassim/StreamingVLM/checkpoints/ --port 6006
+
+- train/epoch — Progress through the dataset. Goes 0→1 linearly over 38 steps, confirming 1 full epoch completed.
+
+- train/loss — Per-step training loss. Dropped from ~2.76→~1.96. The sharp drop in the first ~10 steps is the model quickly adapting from the base Qwen2.5-VL weights to the sports commentary task. Flattening after step 15 means it's converging — good sign.
+
+- train/grad_norm — Magnitude of the gradients before the weight update. Starts high (~22) and drops to ~1.5. High early grad_norm is normal at the start of fine-tuning. The steady decrease means training is stable (no exploding gradients).
+
+- train/learning_rate — The cosine decay schedule. Ramps up for the first ~3 steps (warmup), peaks at 1e-5, then decays to ~0 by step 38. This is exactly what --warmup_ratio 0.03 --lr_scheduler_type cosine produces.
+
+- train/train_loss — Same as train/loss but logged once at the end (epoch-level average = 2.0986). Single dot because it's a summary metric.
+
+- train/total_flos — Total floating point operations performed (~5.7×10¹⁷). A measure of total compute used. Single dot, logged at end only.
+
+- train/train_runtime — Total training time in seconds (~52,039s = 14.5 hours). Single dot.
+
+- train/train_samples_per_second — Throughput: 0.373 samples/sec. Slow due to CPU optimizer offloading, but expected given the workaround.
 
 ---
 
