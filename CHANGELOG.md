@@ -255,9 +255,37 @@ conda activate streamingvlm-infer
 cd /workspace/storage_nassim/StreamingVLM
 bash demo/run_demo.sh
 # Open http://<server-ip>:8765 on Mac, click Start Inference
+
+# For the 10-minute action clip (trims buffering delay and starts
+# at an action-packed segment of the game instead of the slow pre-game aerial intro):
+bash demo/run_demo.sh /workspace/storage_nassim/StreamingVLM/demo/nhl_demo_10min.mp4
 ```
 
 **Status:** Files created and tested successfully end-to-end.
+
+### 2026-03-23 — Increased chunk duration to 2 seconds (temporary, revert after testing)
+**File:** `demo/server.py` line 170
+**Change:** Added `--chunk_duration 2` to the inference subprocess command (default is 1).
+**Why:** 1-second chunks produce very short subtitle text. Testing whether 2-second chunks generate longer, more descriptive commentary.
+**Note:** Model was trained on 1-second chunks so this is out-of-distribution — revert to default if quality degrades.
+**Result:** Real-time confirmed. Per-chunk timing at chunk_duration=2: `total≈0.65s`, `PKV≈0.23s`, `GEN≈0.38s` — processing each 2-second chunk in ~0.65s (~3× faster than real-time). Commentary quality appears reasonable for action scenes (e.g. "Puck battle along...").
+
+### 2026-03-23 — Chunk duration comparison: reverted to 1 second (default)
+**File:** `demo/server.py`
+**Summary of all three chunk durations tested:**
+
+| chunk_duration | Avg latency | Real-time? | Commentary quality |
+|---|---|---|---|
+| 1s (default) | ~0.39s | ✅ (~2.5× faster) | Best — full coherent sentences flow across consecutive cues |
+| 2s | ~0.65s | ✅ (~3× faster) | Shorter fragments per cue; slightly less coherent |
+| 4s | ~1.5s | ✅ (~2.7× faster) | Worst — model generates 1–2 word fragments ("with ...", "and ..."); out-of-distribution |
+
+**Conclusion:** 1-second chunks are optimal. The model was trained on 1-second chunks so it produces the best commentary at that duration. Reverted `--chunk_duration` to `1` (the default).
+
+### 2026-03-23 — Tested chunk_duration=4, reverted to 2
+**File:** `demo/server.py`
+**Change:** Tested `--chunk_duration 4`, then reverted to `--chunk_duration 2`.
+**Result:** chunk_duration=4 produced worse commentary ("with ...", "your puck, ...", "and ...") despite having more visual context. Timing was `total≈1.5s` per 4-second chunk (still real-time). Root cause: model was trained on 1-second chunks, so 4-second chunks are out-of-distribution — it generates a fragment and stops instead of a full sentence. chunk_duration=2 remains the best tradeoff between commentary length and training distribution.
 
 ### 2026-03-23 — Removed timing metadata from VTT output
 **File:** `streaming_vlm/inference/inference.py` line 527

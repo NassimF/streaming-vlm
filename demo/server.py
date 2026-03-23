@@ -167,6 +167,7 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
             "--output_dir", VTT_PATH,
             "--model_path", MODEL_PATH,
             "--model_base", "Qwen2_5",
+            "--chunk_duration", "1",
         ]
 
         print(f"[server] Starting inference: {' '.join(cmd)}", flush=True)
