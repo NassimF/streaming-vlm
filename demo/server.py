@@ -2,6 +2,11 @@
 """
 StreamingVLM Demo Server
 Serves the demo HTML page, video file, and live .vtt subtitles.
+Supports two inference modes:
+  - Video mode:  POST /start        → spawns inference.py on a pre-recorded video
+  - Camera mode: POST /start-camera → spawns camera_inference.py on live frames
+                 POST /frame        → receives JPEG frames from the browser camera
+
 Usage: python demo/server.py --video /path/to/video.mp4 --vtt /tmp/demo_live.vtt --model-path mit-han-lab/StreamingVLM
 """
 
@@ -20,7 +25,11 @@ MODEL_PATH = None
 REPO_ROOT = Path(__file__).parent.parent
 HTML_PATH = Path(__file__).parent / "index.html"
 
+FRAME_DIR = "/tmp/camera_frames"
+CAMERA_VTT_PATH = "/tmp/camera_live.vtt"
+
 inference_proc = None
+frame_counter = 0          # incremented on each POST /frame
 
 
 class DemoHandler(http.server.BaseHTTPRequestHandler):
@@ -35,22 +44,24 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/":
             self._serve_file(HTML_PATH, "text/html")
-
         elif path == "/video":
             self._serve_video()
-
         elif path == "/subtitles.vtt":
-            self._serve_vtt()
-
+            self._serve_vtt(VTT_PATH)
+        elif path == "/camera-subtitles.vtt":
+            self._serve_vtt(CAMERA_VTT_PATH)
         elif path == "/status":
             self._serve_status()
-
         else:
             self.send_error(404)
 
     def do_POST(self):
         if self.path == "/start":
             self._start_inference()
+        elif self.path == "/start-camera":
+            self._start_camera_inference()
+        elif self.path == "/frame":
+            self._receive_frame()
         else:
             self.send_error(404)
 
@@ -76,7 +87,6 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
 
         if range_header:
-            # Parse "bytes=start-end"
             range_val = range_header.strip().replace("bytes=", "")
             parts = range_val.split("-")
             start = int(parts[0]) if parts[0] else 0
@@ -94,7 +104,7 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
             with open(VIDEO_PATH, "rb") as f:
                 f.seek(start)
                 remaining = length
-                chunk = 64 * 1024  # 64KB chunks
+                chunk = 64 * 1024
                 while remaining > 0:
                     data = f.read(min(chunk, remaining))
                     if not data:
@@ -114,9 +124,9 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
                         break
                     self.wfile.write(data)
 
-    def _serve_vtt(self):
-        if VTT_PATH and os.path.exists(VTT_PATH):
-            content = Path(VTT_PATH).read_text(encoding="utf-8")
+    def _serve_vtt(self, vtt_path):
+        if vtt_path and os.path.exists(vtt_path):
+            content = Path(vtt_path).read_text(encoding="utf-8")
         else:
             content = "WEBVTT\n\n"
 
@@ -133,9 +143,10 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
         global inference_proc
         running = inference_proc is not None and inference_proc.poll() is None
         cues = 0
-        if VTT_PATH and os.path.exists(VTT_PATH):
-            content = Path(VTT_PATH).read_text(encoding="utf-8")
-            cues = content.count("-->")
+        # Count cues from whichever VTT is active
+        for vtt in [VTT_PATH, CAMERA_VTT_PATH]:
+            if vtt and os.path.exists(vtt):
+                cues = max(cues, Path(vtt).read_text(encoding="utf-8").count("-->"))
 
         body = json.dumps({"running": running, "cues": cues}).encode()
         self.send_response(200)
@@ -147,17 +158,10 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
     def _start_inference(self):
         global inference_proc
 
-        # Idempotent — don't restart if already running
         if inference_proc is not None and inference_proc.poll() is None:
-            body = json.dumps({"status": "already_running"}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", len(body))
-            self.end_headers()
-            self.wfile.write(body)
+            self._json_response({"status": "already_running"})
             return
 
-        # Remove stale VTT from a previous run
         if VTT_PATH and os.path.exists(VTT_PATH):
             os.remove(VTT_PATH)
 
@@ -176,9 +180,55 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
             cwd=str(REPO_ROOT),
             env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
         )
+        self._json_response({"status": "started"})
 
-        body = json.dumps({"status": "started"}).encode()
-        self.send_response(200)
+    def _start_camera_inference(self):
+        global inference_proc, frame_counter
+
+        if inference_proc is not None and inference_proc.poll() is None:
+            self._json_response({"status": "already_running"})
+            return
+
+        # Clear stale frames and VTT
+        os.makedirs(FRAME_DIR, exist_ok=True)
+        for f in Path(FRAME_DIR).glob("frame_*.jpg"):
+            f.unlink()
+        if os.path.exists(CAMERA_VTT_PATH):
+            os.remove(CAMERA_VTT_PATH)
+        frame_counter = 0
+
+        cmd = [
+            sys.executable, str(REPO_ROOT / "demo" / "camera_inference.py"),
+            "--frame_dir", FRAME_DIR,
+            "--output_dir", CAMERA_VTT_PATH,
+            "--model_path", MODEL_PATH,
+            "--model_base", "Qwen2_5",
+        ]
+
+        print(f"[server] Starting camera inference: {' '.join(cmd)}", flush=True)
+        inference_proc = subprocess.Popen(
+            cmd,
+            cwd=str(REPO_ROOT),
+            env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+        )
+        self._json_response({"status": "started"})
+
+    def _receive_frame(self):
+        global frame_counter
+        content_length = int(self.headers.get("Content-Length", 0))
+        jpeg_data = self.rfile.read(content_length)
+
+        os.makedirs(FRAME_DIR, exist_ok=True)
+        frame_path = os.path.join(FRAME_DIR, f"frame_{frame_counter:05d}.jpg")
+        with open(frame_path, "wb") as f:
+            f.write(jpeg_data)
+        frame_counter += 1
+
+        self._json_response({"status": "ok", "frame": frame_counter - 1})
+
+    def _json_response(self, data, code=200):
+        body = json.dumps(data).encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(body))
         self.end_headers()
@@ -190,7 +240,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="StreamingVLM Demo Server")
     parser.add_argument("--video", required=True, help="Path to video file")
-    parser.add_argument("--vtt", required=True, help="Path for live .vtt output")
+    parser.add_argument("--vtt", required=True, help="Path for live .vtt output (video mode)")
     parser.add_argument("--model-path", default="mit-han-lab/StreamingVLM", help="Model path or HF repo")
     parser.add_argument("--port", type=int, default=8765, help="Port to serve on")
     args = parser.parse_args()

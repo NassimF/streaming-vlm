@@ -212,12 +212,34 @@ Time=00:00:18-00:00:19:  captain Patrick Kane will get back out there ...       
 
 ## New Features
 
+### 2026-03-26 — Feature 2: Live Camera Feed
+**Branch:** `feat/demo-camera`
+**Files changed/created:**
+| File | Change |
+|---|---|
+| `demo/camera_inference.py` | New — reads JPEG frames from a directory, runs same StreamingVLM pipeline as inference.py, writes VTT cues |
+| `demo/server.py` | Added `POST /frame` (saves browser JPEG frames), `POST /start-camera` (spawns camera_inference.py), `GET /camera-subtitles.vtt` |
+| `demo/index.html` | Added "Use Camera" toggle button; `getUserMedia` camera capture; posts one JPEG frame/second to `/frame`; switches VTT polling endpoint to `/camera-subtitles.vtt` in camera mode |
+
+**How it works:**
+1. User clicks "Use Camera" → browser asks for camera permission → live feed appears in video element
+2. User clicks "Start Inference" → server spawns `camera_inference.py`, browser starts posting frames every 1s
+3. `camera_inference.py` watches `/tmp/camera_frames/` for new frames, runs the model, writes commentary to `/tmp/camera_live.vtt`
+4. Commentary text box updates every 500ms as in video mode
+5. Video mode (pre-recorded files) is unchanged — both modes coexist
+
+**Result:** Pending test.
+
 ### 2026-03-26 — Feature 1: Commentary Text Box Below Video
 **Branch:** `feat/demo-textbox`
 **File:** `demo/index.html`
 **Change:** Replaced the HTML5 `<track>`/blob-URL subtitle overlay with a styled scrollable text box below the video. Commentary now accumulates as a flowing paragraph with no timestamps visible. Removed `swapTrack()`, `currentBlobUrl`, blob URL logic, and `video::cue` CSS. Updated `pollSubtitles()` to parse VTT cue texts, append only new cues since last poll, and auto-scroll the box to the bottom.
 
-**Result:** Pending test.
+**Additional fixes after testing:**
+- Stripped trailing ` ...` from model cue output (model appends this to most cues)
+- Increased box height from 140px → 260px
+- Auto-scroll only triggers when user is within 60px of the bottom (allows scrolling up freely)
+**Result:** Tested and working. Merged into `feat/token-count-tracking`.
 
 ---
 
