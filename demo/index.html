@@ -43,19 +43,13 @@
       display: block;
     }
 
-    /* Style native subtitles */
-    video::cue {
-      background: rgba(0, 0, 0, 0.75);
-      color: #ffffff;
-      font-size: 1.1em;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-
     .controls {
       margin-top: 1rem;
       display: flex;
       align-items: center;
       gap: 1rem;
+      width: 90vw;
+      max-width: 1280px;
     }
 
     button {
@@ -101,6 +95,30 @@
       color: #666;
       margin-top: 0.4rem;
     }
+
+    #commentary-box {
+      width: 90vw;
+      max-width: 1280px;
+      margin-top: 1rem;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 1rem 1.2rem;
+      height: 260px;
+      overflow-y: auto;
+      font-size: 1rem;
+      line-height: 1.6;
+      color: #e8e8e8;
+    }
+
+    #commentary-text {
+      white-space: pre-wrap;
+    }
+
+    #commentary-placeholder {
+      color: #555;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -122,16 +140,24 @@
     </div>
   </div>
 
+  <div id="commentary-box">
+    <span id="commentary-placeholder">Commentary will appear here once inference starts...</span>
+    <span id="commentary-text"></span>
+  </div>
+
   <script>
     const video = document.getElementById('v');
     const statusEl = document.getElementById('status');
     const dotEl = document.getElementById('dot');
     const cueCountEl = document.getElementById('cue-count');
     const startBtn = document.getElementById('startBtn');
+    const commentaryBox = document.getElementById('commentary-box');
+    const commentaryText = document.getElementById('commentary-text');
+    const commentaryPlaceholder = document.getElementById('commentary-placeholder');
 
     let pollInterval = null;
-    let currentBlobUrl = null;
     let lastCueCount = 0;
+    let renderedCues = 0;
 
     async function startDemo() {
       startBtn.disabled = true;
@@ -166,7 +192,6 @@
           setStatus('loading', 'Model loaded, waiting for first cue...');
           setTimeout(waitForFirstCue, 1000);
         } else {
-          // Not started yet, keep waiting
           setTimeout(waitForFirstCue, 1000);
         }
       } catch (e) {
@@ -176,58 +201,59 @@
 
     async function pollSubtitles() {
       try {
-        // Cache-bust with timestamp so browser never caches this request
         const resp = await fetch('/subtitles.vtt?t=' + Date.now());
         if (!resp.ok) return;
-        const text = await resp.text();
+        const vttText = await resp.text();
 
-        // Count cues for status display
-        const cues = (text.match(/-->/g) || []).length;
-        if (cues !== lastCueCount) {
-          lastCueCount = cues;
-          cueCountEl.textContent = `${cues} subtitle cue${cues !== 1 ? 's' : ''} generated`;
+        // Parse cue texts from VTT — extract lines that are not timestamps,
+        // not "WEBVTT", and not blank
+        const lines = vttText.split('\n');
+        const cueTexts = [];
+        let inCue = false;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.includes('-->')) {
+            inCue = true;
+            continue;
+          }
+          if (trimmed === '' ) {
+            inCue = false;
+            continue;
+          }
+          if (inCue && trimmed !== 'WEBVTT' && trimmed !== '...') {
+            // Strip trailing " ..." that the model appends to most cues
+            const cleaned = trimmed.replace(/\s*\.\.\.\s*$/, '').trim();
+            if (cleaned) cueTexts.push(cleaned);
+          }
         }
 
-        // Swap the <track> element with a fresh Blob URL
-        // (Direct <track src="..."> is cached aggressively by browsers)
-        swapTrack(text);
+        const totalCues = cueTexts.length;
 
-        // Check if inference is done
+        // Update cue count display
+        if (totalCues !== lastCueCount) {
+          lastCueCount = totalCues;
+          cueCountEl.textContent = `${totalCues} cue${totalCues !== 1 ? 's' : ''} generated`;
+        }
+
+        // Append only new cues since last render
+        if (totalCues > renderedCues) {
+          const newCues = cueTexts.slice(renderedCues);
+          if (renderedCues === 0) {
+            commentaryPlaceholder.style.display = 'none';
+            commentaryText.textContent = newCues.join(' ');
+          } else {
+            commentaryText.textContent += ' ' + newCues.join(' ');
+          }
+          renderedCues = totalCues;
+          // Auto-scroll to bottom only if user is already near the bottom
+          const nearBottom = commentaryBox.scrollHeight - commentaryBox.scrollTop - commentaryBox.clientHeight < 60;
+          if (nearBottom) commentaryBox.scrollTop = commentaryBox.scrollHeight;
+        }
+
         checkStatus();
 
       } catch (e) {
         // Network error — keep polling
-      }
-    }
-
-    function swapTrack(vttText) {
-      // Remove existing track
-      const oldTrack = video.querySelector('track');
-      const oldUrl = currentBlobUrl;
-
-      // Create new Blob URL
-      const blob = new Blob([vttText], { type: 'text/vtt' });
-      const url = URL.createObjectURL(blob);
-      currentBlobUrl = url;
-
-      // Add new track
-      const track = document.createElement('track');
-      track.kind = 'subtitles';
-      track.label = 'Commentary';
-      track.srclang = 'en';
-      track.src = url;
-      track.default = true;
-      if (oldTrack) oldTrack.remove();
-      video.appendChild(track);
-
-      // Force the track to show (Chrome requires explicit activation)
-      if (video.textTracks.length > 0) {
-        video.textTracks[0].mode = 'showing';
-      }
-
-      // Revoke old URL after a delay to avoid memory leaks
-      if (oldUrl) {
-        setTimeout(() => URL.revokeObjectURL(oldUrl), 5000);
       }
     }
 
@@ -236,7 +262,6 @@
         const resp = await fetch('/status');
         const data = await resp.json();
         if (!data.running && lastCueCount > 0) {
-          // Inference finished
           clearInterval(pollInterval);
           setStatus('done', `Done — ${lastCueCount} cues generated`);
         }
