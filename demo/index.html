@@ -122,9 +122,24 @@
       color: #555;
       font-style: italic;
     }
+
+    #visibility-warning {
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      background: #e05050;
+      color: #fff;
+      text-align: center;
+      padding: 0.7rem 1rem;
+      font-weight: 600;
+      font-size: 1rem;
+      z-index: 999;
+    }
   </style>
 </head>
 <body>
+
+  <div id="visibility-warning">⚠️ Keep this tab in the foreground — switching tabs pauses camera frame capture and will stop inference.</div>
 
   <h1>StreamingVLM <span>Live Commentary</span></h1>
 
@@ -327,6 +342,14 @@
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    // ── Visibility warning ─────────────────────────────────────────────────────
+    const visibilityWarning = document.getElementById('visibility-warning');
+    document.addEventListener('visibilitychange', () => {
+      if (cameraMode && frameInterval) {
+        visibilityWarning.style.display = document.hidden ? 'block' : 'none';
+      }
+    });
 
     function resetCommentary() {
       commentaryText.textContent = '';

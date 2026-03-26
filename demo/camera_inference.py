@@ -52,8 +52,12 @@ def _wait_for_frame(frame_dir, frame_idx, timeout=60):
 
 def _load_frame(path, target_h, target_w):
     """Load a JPEG and return uint8 numpy array of shape [1, H, W, 3]."""
-    img = Image.open(path).convert("RGB").resize((target_w, target_h), Image.LANCZOS)
-    return np.array(img, dtype=np.uint8)[np.newaxis]  # [1, H, W, 3]
+    try:
+        img = Image.open(path).convert("RGB").resize((target_w, target_h), Image.LANCZOS)
+        return np.array(img, dtype=np.uint8)[np.newaxis]  # [1, H, W, 3]
+    except Exception as e:
+        print(f"[camera_inference] Warning: could not load frame {path}: {e}. Using blank frame.", flush=True)
+        return np.zeros((1, target_h, target_w, 3), dtype=np.uint8)
 
 
 def camera_inference(frame_dir, output_dir, model_path, model_base="Qwen2_5",

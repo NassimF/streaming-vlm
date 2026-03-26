@@ -220,8 +220,10 @@ class DemoHandler(http.server.BaseHTTPRequestHandler):
 
         os.makedirs(FRAME_DIR, exist_ok=True)
         frame_path = os.path.join(FRAME_DIR, f"frame_{frame_counter:05d}.jpg")
-        with open(frame_path, "wb") as f:
+        tmp_path = frame_path + ".tmp"
+        with open(tmp_path, "wb") as f:
             f.write(jpeg_data)
+        os.replace(tmp_path, frame_path)  # atomic — inference never sees partial file
         frame_counter += 1
 
         self._json_response({"status": "ok", "frame": frame_counter - 1})

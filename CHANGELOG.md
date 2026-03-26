@@ -228,7 +228,22 @@ Time=00:00:18-00:00:19:  captain Patrick Kane will get back out there ...       
 4. Commentary text box updates every 500ms as in video mode
 5. Video mode (pre-recorded files) is unchanged — both modes coexist
 
-**Result:** Pending test.
+**Bugs fixed before/during testing:**
+- Race condition: server writing JPEG while inference read it → `PIL.UnidentifiedImageError` crash at frame 152. Fixed with atomic write (`os.replace` from `.tmp`).
+- Added blank-frame fallback in `_load_frame()` so a single unreadable frame doesn't crash the loop.
+- Tab switching pauses browser `setInterval` (Chrome throttles background tabs) → frame posting stops → inference times out. Fixed with Page Visibility API warning banner that appears when tab loses focus in camera mode.
+
+**Test results (2026-03-26, ~6.7 min run, 403+ loops):**
+
+*Latency:*
+- Steady-state: ~0.9–1.1s per chunk (slightly over 1s budget but acceptable)
+- Loop 383: **30.5s spike** — caused by KV cache eviction at the 16-second visual window boundary; when the oldest visual tokens are pruned and the cache is reorganized, it occasionally stalls. Not a crash — inference resumed normally on the next loop.
+
+*Commentary quality:*
+- The model hallucinated an entire fictional YouTube product review (vitamin D3 by "Nisha") and sustained it for the full 6+ minutes, largely ignoring the actual camera frames after the first few loops.
+- Root cause: once the KV cache accumulates a few hallucinated tokens, the model conditions all future generation on that fictional context rather than re-anchoring to the visual input. The model was also trained exclusively on sports commentary, so a person sitting still in front of a camera is far out-of-distribution.
+- Camera mode works best when pointed at something active and sports-like. For a static subject, commentary quality degrades quickly.
+- Potential fix: use a more constrained system prompt or reset the KV cache more frequently to force visual re-anchoring.
 
 ### 2026-03-26 — Feature 1: Commentary Text Box Below Video
 **Branch:** `feat/demo-textbox`
