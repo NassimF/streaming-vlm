@@ -15,8 +15,14 @@ DEFAULT_MODEL="mit-han-lab/StreamingVLM"
 
 VIDEO_PATH="${1:-$DEFAULT_VIDEO}"
 MODEL_PATH="${2:-$DEFAULT_MODEL}"
-VTT_PATH="/tmp/demo_live.vtt"
 PORT=8765
+
+# ── Generate unique VTT filename: <video_basename>_<YYYYMMDD_HHMMSS>.vtt ────
+VIDEO_BASENAME=$(basename "$VIDEO_PATH" .mp4)
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+VTT_DIR="$(dirname "$0")/subtitles"
+mkdir -p "$VTT_DIR"
+VTT_PATH="$VTT_DIR/${VIDEO_BASENAME}_${TIMESTAMP}.vtt"
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────────
 if [ ! -f "$VIDEO_PATH" ]; then
@@ -24,9 +30,6 @@ if [ ! -f "$VIDEO_PATH" ]; then
     echo "Usage: bash demo/run_demo.sh [video_path] [model_path]"
     exit 1
 fi
-
-# Remove stale VTT from a previous run
-rm -f "$VTT_PATH"
 
 # ── Launch ────────────────────────────────────────────────────────────────────
 echo "========================================"
